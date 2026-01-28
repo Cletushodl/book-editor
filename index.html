@@ -204,26 +204,29 @@ function loadScript(src) {
 // Start loading immediately
 loadTypo();
 
-// ====== ANALYSIS ENGINE ======
-function analyzeText(text) {
+// ====== ANALYSIS ENGINE (async, non-blocking) ======
+const yieldToUI = () => new Promise(r => setTimeout(r, 0));
+
+async function analyzeText(text, onProgress) {
   const found = [];
   const lines = text.split('\n');
   let id = 0;
+  const CHUNK = 200; // yield every N lines
 
-  // Helper to add issue
   function add(cat, severity, line, col, len, msg, suggestion) {
     found.push({ id: id++, category: cat, severity, line, col, length: len, message: msg, suggestion, fixed: false });
   }
 
   // 1. Ligature detection
+  onProgress('Checking ligature breaks…', 5);
+  await yieldToUI();
+  const ligEntries = Object.entries(LIGATURE_WORDS);
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    for (const [broken, fixed] of Object.entries(LIGATURE_WORDS)) {
-      // Use word boundary matching
+    for (const [broken, fixed] of ligEntries) {
       const re = new RegExp('(?:^|\\b|\\s)(' + broken.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')(?:\\b|\\s|$|[.,;:!?])', 'gi');
       let m;
       while ((m = re.exec(line)) !== null) {
-        const matchStart = m.index + (m[0].length - m[1].length - (m[0].endsWith(m[1]) ? 0 : 1));
         const idx = line.toLowerCase().indexOf(broken.toLowerCase(), m.index);
         if (idx >= 0) {
           add('Ligature Break', 'error', i + 1, idx + 1, broken.length,
@@ -231,9 +234,12 @@ function analyzeText(text) {
         }
       }
     }
+    if (i % CHUNK === 0) { onProgress('Checking ligature breaks…', 5 + (i/lines.length)*8); await yieldToUI(); }
   }
 
   // 2. Repeated words
+  onProgress('Checking repeated words…', 15);
+  await yieldToUI();
   for (let i = 0; i < lines.length; i++) {
     const re = /\b(\w{2,})\s+\1\b/gi;
     let m;
@@ -243,16 +249,17 @@ function analyzeText(text) {
     }
   }
 
-  // 3. Quote consistency - straight vs curly
+  // 3. Quote consistency
+  onProgress('Checking quote consistency…', 22);
+  await yieldToUI();
   let hasStraight = false, hasCurly = false;
   for (const line of lines) {
-    if (/["""]/.test(line)) { // one of the curlies
+    if (/["""]/.test(line)) {
       if (/\u201c|\u201d/.test(line)) hasCurly = true;
       if (/"/.test(line)) hasStraight = true;
     }
   }
   if (hasStraight && hasCurly) {
-    // Find each straight quote
     for (let i = 0; i < lines.length; i++) {
       let idx = -1;
       while ((idx = lines[i].indexOf('"', idx + 1)) !== -1) {
@@ -263,19 +270,18 @@ function analyzeText(text) {
   }
 
   // 4. Unclosed quotes
+  onProgress('Checking unclosed quotes…', 30);
+  await yieldToUI();
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    // Count straight quotes
     const straightCount = (line.match(/"/g) || []).length;
     if (straightCount % 2 !== 0) {
       add('Unclosed Quote', 'warning', i + 1, 1, line.length,
         'Possible unclosed quote on this line.', null);
     }
-    // Count curly quotes
     const opens = (line.match(/\u201c/g) || []).length;
     const closes = (line.match(/\u201d/g) || []).length;
     if (opens !== closes) {
-      // Check if this is dialogue continuing to next line
       const nextLine = lines[i + 1] || '';
       const nextOpens = (nextLine.match(/\u201c/g) || []).length;
       if (opens > closes && nextOpens === 0) {
@@ -286,6 +292,8 @@ function analyzeText(text) {
   }
 
   // 5. Dash consistency
+  onProgress('Checking dash consistency…', 38);
+  await yieldToUI();
   let hasEmDash = false, hasEnDash = false, hasDoubleDash = false;
   for (const line of lines) {
     if (/\u2014/.test(line)) hasEmDash = true;
@@ -295,7 +303,6 @@ function analyzeText(text) {
   if ((hasEmDash ? 1 : 0) + (hasEnDash ? 1 : 0) + (hasDoubleDash ? 1 : 0) > 1) {
     for (let i = 0; i < lines.length; i++) {
       let m;
-      // Flag double-dashes when em-dashes exist
       if (hasEmDash) {
         const re = /(?<!-)--(?!-)/g;
         while ((m = re.exec(lines[i])) !== null) {
@@ -303,7 +310,6 @@ function analyzeText(text) {
             'Double-dash found; use em dash (—) for consistency.', '—');
         }
       }
-      // Flag en-dashes used where em-dashes expected (mid-sentence)
       if (hasEmDash) {
         const re2 = /\w\s*\u2013\s*\w/g;
         while ((m = re2.exec(lines[i])) !== null) {
@@ -314,15 +320,14 @@ function analyzeText(text) {
     }
   }
 
-  // 6. Dialogue punctuation (Chicago: comma/period inside quotes)
+  // 6. Dialogue punctuation
+  onProgress('Checking dialogue punctuation…', 45);
+  await yieldToUI();
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    // Straight quotes: ". or ",
     let m;
     const re1 = /["'\u201d]([.,])/g;
     while ((m = re1.exec(line)) !== null) {
-      // This is actually wrong order - punctuation should be INSIDE
-      // Pattern: closing-quote followed by period/comma = wrong
       add('Dialogue Punctuation', 'error', i + 1, m.index + 1, 2,
         `Chicago Manual: Place ${m[1] === '.' ? 'period' : 'comma'} inside closing quote.`,
         m[0][0] === '\u201d' ? m[1] + '\u201d' : m[1] + m[0][0]);
@@ -330,11 +335,12 @@ function analyzeText(text) {
   }
 
   // 7. Capitalization after periods
+  onProgress('Checking capitalization…', 52);
+  await yieldToUI();
   for (let i = 0; i < lines.length; i++) {
     const re = /\.\s+([a-z])/g;
     let m;
     while ((m = re.exec(lines[i])) !== null) {
-      // Skip common abbreviations
       const before = lines[i].substring(Math.max(0, m.index - 10), m.index + 1);
       if (/(?:Mr|Mrs|Ms|Dr|Jr|Sr|vs|etc|e\.g|i\.e|a\.m|p\.m)\./i.test(before)) continue;
       add('Capitalization', 'warning', i + 1, m.index + m[0].length, 1,
@@ -344,18 +350,21 @@ function analyzeText(text) {
   }
 
   // 8. Double spaces
+  onProgress('Checking spacing…', 58);
+  await yieldToUI();
   for (let i = 0; i < lines.length; i++) {
     const re = /  +/g;
     let m;
     while ((m = re.exec(lines[i])) !== null) {
-      // Skip leading indentation
       if (m.index === 0) continue;
       add('Double Space', 'info', i + 1, m.index + 1, m[0].length,
         `${m[0].length} consecutive spaces found.`, ' ');
     }
   }
 
-  // 9. Chapter/heading structure
+  // 9. Heading structure
+  onProgress('Checking heading structure…', 64);
+  await yieldToUI();
   let lastHeadingLevel = 0;
   for (let i = 0; i < lines.length; i++) {
     const hm = lines[i].match(/^(#{1,6})\s/);
@@ -366,7 +375,6 @@ function analyzeText(text) {
           `Heading jumps from H${lastHeadingLevel} to H${level}. Consider using H${lastHeadingLevel + 1}.`, null);
       }
       lastHeadingLevel = level;
-      // Check heading capitalization (title case)
       const title = lines[i].substring(hm[0].length);
       if (title && /^[a-z]/.test(title)) {
         add('Heading Structure', 'info', i + 1, hm[0].length + 1, 1,
@@ -376,21 +384,20 @@ function analyzeText(text) {
     }
   }
 
-  // 10. Spelling (if Typo is loaded)
+  // 10. Spelling (heaviest phase — yield frequently)
   if (typoReady && typoInstance) {
+    onProgress('Spell checking…', 70);
+    await yieldToUI();
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      // Skip headings markdown, code blocks
       if (/^```/.test(line) || /^#+\s/.test(line)) continue;
       const re = /\b([a-zA-Z]{3,})\b/g;
       let m;
       while ((m = re.exec(line)) !== null) {
         const word = m[1];
-        // Skip words that look like markdown/code
-        if (/^[A-Z]{2,}$/.test(word)) continue; // acronyms
+        if (/^[A-Z]{2,}$/.test(word)) continue;
         if (!typoInstance.check(word) && !typoInstance.check(word.toLowerCase())) {
           const suggestions = typoInstance.suggest(word, 3);
-          // Skip if it's already caught as ligature
           const isLigature = found.some(f => f.category === 'Ligature Break' && f.line === i + 1 && 
             Math.abs(f.col - (m.index + 1)) < 3);
           if (!isLigature) {
@@ -400,9 +407,15 @@ function analyzeText(text) {
           }
         }
       }
+      if (i % 50 === 0) {
+        onProgress(`Spell checking… (line ${i+1}/${lines.length})`, 70 + (i/lines.length)*25);
+        await yieldToUI();
+      }
     }
   }
 
+  onProgress('Finalizing…', 98);
+  await yieldToUI();
   return found;
 }
 
@@ -460,24 +473,30 @@ function showProgress(label, pct) {
 function hideProgress() { progressWrap.classList.remove('show'); progressFill.style.width = '0%'; }
 
 // Analyze
-document.getElementById('analyzeBtn').addEventListener('click', async () => {
+const analyzeBtn = document.getElementById('analyzeBtn');
+analyzeBtn.addEventListener('click', async () => {
   if (!editor.value.trim()) return;
-  showProgress('Loading dictionary…', 10);
+  analyzeBtn.disabled = true;
+  analyzeBtn.textContent = '⏳ Analyzing…';
+  analyzeBtn.style.opacity = '0.6';
+
+  showProgress('Loading dictionary…', 2);
   if (!typoReady) {
     await loadTypo();
   }
-  showProgress('Analyzing…', 40);
-  // Yield to let UI paint
-  await new Promise(r => setTimeout(r, 50));
-  issues = analyzeText(editor.value);
-  showProgress('Analyzing…', 90);
-  await new Promise(r => setTimeout(r, 50));
+  showProgress('Starting analysis…', 5);
+  await new Promise(r => setTimeout(r, 0));
+
+  issues = await analyzeText(editor.value, showProgress);
   fixedCount = 0;
   selectedIdx = -1;
   ignored.clear();
   renderIssues();
   updateStats();
   showProgress('Done!', 100);
+  analyzeBtn.disabled = false;
+  analyzeBtn.textContent = '🔍 Analyze';
+  analyzeBtn.style.opacity = '';
   setTimeout(hideProgress, 800);
 });
 
